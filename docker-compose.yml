@@ -1,0 +1,11 @@
+version: "3.9"
+
+services:
+  researchpilot:
+    build: .
+    env_file: .env
+    volumes:
+      - ./src:/app/src
+      - ./prompts:/app/prompts
+    stdin_open: true
+    tty: true
