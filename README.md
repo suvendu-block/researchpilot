@@ -2,6 +2,8 @@
 
 AI-powered research paper finder. Search for academic papers by topic and get AI-evaluated results with relevance scores.
 
+**Live:** https://researchpilot-9k88.onrender.com
+
 ## Quick Start
 
 ```bash
