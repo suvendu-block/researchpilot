@@ -6,25 +6,32 @@ import { createChildLogger } from "../lib/logger";
 
 const log = createChildLogger("agent");
 
-// Config 
+// ── Config ─────────────────────────────────────────────────
+
+// default models — gemini 3.6 flash is fast and cheap, 3.5 as fallback
 const PRIMARY_MODEL = "gemini-3.6-flash";
 const FALLBACK_MODEL = "gemini-3.5-flash";
-const TIMEOUT_MS = 60_000;
+const TIMEOUT_MS = 60_000; // 60s should be plenty for most queries
 const MAX_RESULTS = 5;
 
-// Types
+// ── Types ──────────────────────────────────────────────────
+
+// options you can pass when calling the agent
 interface AgentOptions {
-  model?: string;
-  promptVersion?: string;
-  maxResults?: number;
+  model?: string;        // override the default model
+  promptVersion?: string; // which prompt file to use (v1, v2, etc.)
+  maxResults?: number;   // how many papers to fetch
 }
 
+// extend Error with optional fields from the provider
 interface AgentError extends Error {
   statusCode?: number;
   isRetryable?: boolean;
 }
 
-// Helpers 
+// ── Helpers ────────────────────────────────────────────────
+
+// check if this is a transient provider error we should retry
 function isProviderError(error: unknown): boolean {
   const err = error as AgentError;
   return (
@@ -33,6 +40,7 @@ function isProviderError(error: unknown): boolean {
   );
 }
 
+// race a promise against a timeout — if it takes too long, bail
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return Promise.race([
     promise,
@@ -42,13 +50,17 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   ]);
 }
 
-// Search OpenAlex 
+// ── Search OpenAlex ────────────────────────────────────────
+
+// hits the OpenAlex API to find papers matching the topic
+// OpenAlex is great because it's free and doesn't need an API key
 async function searchPapers(topic: string, maxResults: number = MAX_RESULTS) {
   log.info({ topic, maxResults }, "Searching OpenAlex");
 
   const searchUrl = new URL("https://api.openalex.org/works");
   searchUrl.searchParams.set("search", topic);
   searchUrl.searchParams.set("per_page", String(maxResults));
+  // only grab the fields we actually need — keeps response size down
   searchUrl.searchParams.set(
     "select",
     "id,title,authorships,publication_year,cited_by_count,doi,primary_location,abstract_inverted_index"
@@ -56,6 +68,7 @@ async function searchPapers(topic: string, maxResults: number = MAX_RESULTS) {
 
   const res = await throttledFetch(searchUrl.toString(), {
     headers: {
+      // OpenAlex asks us to identify ourselves — this is polite
       "User-Agent": "ResearchPilot/1.0 (mailto:research@pilot.dev)",
     },
   });
@@ -70,6 +83,8 @@ async function searchPapers(topic: string, maxResults: number = MAX_RESULTS) {
   log.info({ count, total: data.meta?.count }, "Papers found");
 
   return (data.results ?? []).map((paper: any) => {
+    // OpenAlex stores abstracts as an "inverted index" — basically a word position map.
+    // we need to reconstruct the actual text from it. weird format but it works.
     let abstract = "";
     if (paper.abstract_inverted_index) {
       const index = paper.abstract_inverted_index;
@@ -93,8 +108,8 @@ async function searchPapers(topic: string, maxResults: number = MAX_RESULTS) {
 
     return {
       title: paper.title,
-      authors: authors.slice(0, 3),
-      abstract: abstract.slice(0, 300),
+      authors: authors.slice(0, 3), // cap at 3 authors to keep it readable
+      abstract: abstract.slice(0, 300), // abstracts can be long, trim it
       year: paper.publication_year,
       citations: paper.cited_by_count,
       venue,
@@ -102,7 +117,10 @@ async function searchPapers(topic: string, maxResults: number = MAX_RESULTS) {
   });
 }
 
-// Format papers for LLM 
+// ── Format papers for LLM ──────────────────────────────────
+
+// takes the raw paper data and turns it into a nice text block
+// that the LLM can evaluate and score
 function formatPapers(papers: any[], topic: string): string {
   const papersText = papers
     .map(
@@ -114,7 +132,9 @@ function formatPapers(papers: any[], topic: string): string {
   return `Here are papers found for "${topic}":\n\n${papersText}\n\nEvaluate and present the results.`;
 }
 
-// Generate with model 
+// ── Generate with model ────────────────────────────────────
+
+// the actual LLM call — swaps in whichever model we're using
 async function generateWithModel(
   model: string,
   prompt: string,
@@ -136,7 +156,10 @@ async function generateWithModel(
   return result.text;
 }
 
-// Main agent
+// ── Main agent ─────────────────────────────────────────────
+
+// the entry point — searches for papers, then asks the LLM to evaluate them
+// if the primary model fails, we try the fallback automatically
 export async function runAgent(
   topic: string,
   options: AgentOptions = {}
@@ -150,7 +173,7 @@ export async function runAgent(
   const startTime = Date.now();
   log.info({ topic, model, promptVersion, maxResults }, "Agent started");
 
-  // Step 1: Search papers
+  // Step 1: Search papers from OpenAlex
   let papers: any[];
   try {
     papers = await searchPapers(topic, maxResults);
@@ -177,7 +200,8 @@ export async function runAgent(
   } catch (error) {
     log.warn({ model, error: (error as Error).message }, "LLM failed");
 
-    // Step 3: Try fallback model
+    // Step 3: If primary model choked, try the fallback
+    // this catches 429 (rate limit), 500s, and timeouts
     if (isProviderError(error) || (error as Error).message.includes("Timeout")) {
       const fallback = model === PRIMARY_MODEL ? FALLBACK_MODEL : PRIMARY_MODEL;
       log.info({ fallback }, "Trying fallback model");

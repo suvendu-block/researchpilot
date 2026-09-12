@@ -6,8 +6,12 @@ import { createChildLogger } from "./lib/logger";
 const log = createChildLogger("cli");
 
 // ── Parse args ─────────────────────────────────────────────
+
+// yeah, this is a pretty basic arg parser. nothing fancy, just works.
+// if we ever need something more robust, could swap in commander or yargs.
 const args = process.argv.slice(2);
 
+// grab a value by flag name — returns undefined if not found
 function getArg(flag: string, short?: string): string | undefined {
   const idx = args.indexOf(flag);
   if (idx !== -1) return args[idx + 1];
@@ -18,6 +22,7 @@ function getArg(flag: string, short?: string): string | undefined {
   return undefined;
 }
 
+// check if a boolean flag is present (like --langgraph)
 function hasFlag(flag: string, short?: string): boolean {
   return args.includes(flag) || (short ? args.includes(short) : false);
 }
@@ -49,6 +54,8 @@ Examples:
 }
 
 // ── Get options ────────────────────────────────────────────
+
+// pull all the options from the command line
 const topic = getArg("--topic", "-t");
 const results = parseInt(getArg("--results", "-r") || "5", 10);
 const model = getArg("--model", "-m");
@@ -56,12 +63,15 @@ const promptVersion = getArg("--prompt-version", "-p");
 const useLangGraph = hasFlag("--langgraph", "-l");
 const parallelQueries = parseInt(getArg("--queries", "-q") || "3", 10);
 
+// topic is the one thing we absolutely need
 if (!topic) {
   console.error("Error: --topic is required. Use --help for usage.");
   process.exit(1);
 }
 
 // ── Banner ─────────────────────────────────────────────────
+
+// nice little banner so the user knows what's happening
 console.log(`
 ResearchPilot - AI Research Paper Finder
 ────────────────────────────────────────
@@ -73,12 +83,14 @@ ${useLangGraph ? `Queries:  ${parallelQueries}` : ""}
 `);
 
 // ── Run agent ──────────────────────────────────────────────
+
 const startTime = Date.now();
 log.info({ topic, model, promptVersion, results, useLangGraph, parallelQueries }, "CLI started");
 
 try {
   let text: string;
   
+  // two flavors: standard agent (simple) or langgraph (parallel search, more steps)
   if (useLangGraph) {
     text = await runLangGraphAgent(topic, {
       model,

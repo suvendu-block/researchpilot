@@ -1,6 +1,10 @@
 import { tool } from "ai";
 import { z } from "zod";
 
+// tool for fetching full paper details by OpenAlex ID
+// useful when you want complete abstracts and metadata for specific papers
+// (e.g., after the agent identifies the most relevant ones)
+
 export const getPaperDetailsTool = tool({
   description:
     "Get full details for specific papers by their OpenAlex IDs. Use this to get complete abstracts and metadata for the most relevant papers.",
@@ -8,10 +12,11 @@ export const getPaperDetailsTool = tool({
     paperIds: z
       .array(z.string())
       .min(1)
-      .max(10)
+      .max(10) // OpenAlex handles multiple IDs in one query via pipe separator
       .describe("Array of OpenAlex paper IDs to look up"),
   }),
   execute: async ({ paperIds }) => {
+    // OpenAlex lets you filter by multiple IDs using pipe-separated values
     const filter = paperIds.join("|");
     const url = new URL("https://api.openalex.org/works");
     url.searchParams.set("filter", `openalex:${filter}`);
@@ -33,6 +38,7 @@ export const getPaperDetailsTool = tool({
     const data = await res.json();
 
     const papers = (data.results ?? []).map((paper: any) => {
+      // same inverted index reconstruction as everywhere else
       let abstract = "";
       if (paper.abstract_inverted_index) {
         const index = paper.abstract_inverted_index;

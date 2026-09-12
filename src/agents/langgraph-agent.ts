@@ -7,13 +7,15 @@ import { createChildLogger } from "../lib/logger";
 const log = createChildLogger("langgraph-agent");
 
 // ── Config ──────────────────────────────────────────────────
+
 const PRIMARY_MODEL = "gemini-3.6-flash";
 const FALLBACK_MODEL = "gemini-3.5-flash";
-const TIMEOUT_MS = 120_000;
+const TIMEOUT_MS = 120_000; // 2 min — this agent does more work so needs more time
 const MAX_RESULTS = 5;
-const PARALLEL_QUERIES = 3;
+const PARALLEL_QUERIES = 3; // how many different search queries to run in parallel
 
 // ── Types ───────────────────────────────────────────────────
+
 export interface AgentOptions {
   model?: string;
   promptVersion?: string;
@@ -21,6 +23,7 @@ export interface AgentOptions {
   parallelQueries?: number;
 }
 
+// a paper as we use it internally
 interface Paper {
   id: string;
   title: string;
@@ -31,6 +34,7 @@ interface Paper {
   venue?: string;
 }
 
+// the state that flows through the graph — each node reads/writes to this
 interface AgentState {
   topic: string;
   searchQueries: string[];
@@ -41,6 +45,9 @@ interface AgentState {
 }
 
 // ── State Annotation ────────────────────────────────────────
+
+// LangGraph needs this annotation to know what fields exist in state
+// and how to merge results from multiple nodes
 const AgentStateAnnotation = Annotation.Root({
   topic: Annotation<string>,
   searchQueries: Annotation<string[]>,
@@ -51,15 +58,21 @@ const AgentStateAnnotation = Annotation.Root({
 });
 
 // ── LLM Setup ──────────────────────────────────────────────
+
+// creates a fresh LLM instance — we need a new one each time
+// because LangChain's ChatGoogleGenerativeAI is stateless anyway
 function createLLM(model: string) {
   return new ChatGoogleGenerativeAI({
     model,
     apiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY,
-    temperature: 0.3,
+    temperature: 0.3, // low temp = more focused, less creative. good for research.
   });
 }
 
 // ── Helper: Throttled Fetch ─────────────────────────────────
+
+// basic rate limit handler — if we get a 429, wait and retry once
+// (we have a fancier version in lib/throttle.ts but this works for now)
 async function throttledFetch(url: string, options?: RequestInit): Promise<Response> {
   const res = await fetch(url, options);
   if (res.status === 429) {
@@ -72,6 +85,9 @@ async function throttledFetch(url: string, options?: RequestInit): Promise<Respo
 }
 
 // ── Helper: Parse OpenAlex Paper ────────────────────────────
+
+// converts raw OpenAlex JSON into our clean Paper type
+// handles the inverted index abstract thing (same as in the standard agent)
 function parsePaper(paper: any): Paper {
   let abstract = "";
   if (paper.abstract_inverted_index) {
@@ -96,7 +112,7 @@ function parsePaper(paper: any): Paper {
     id: paper.id,
     title: paper.title,
     authors,
-    abstract: abstract.slice(0, 500),
+    abstract: abstract.slice(0, 500), // keep abstracts manageable
     year: paper.publication_year,
     citations: paper.cited_by_count,
     venue: paper.primary_location?.source?.display_name,
@@ -104,6 +120,12 @@ function parsePaper(paper: any): Paper {
 }
 
 // ── Node: Generate Search Queries ───────────────────────────
+
+// the first step — ask the LLM to come up with diverse search queries
+// this is way better than just searching for the raw topic because:
+// - we get variations (synonyms, subtopics, broader/narrower terms)
+// - parallel searches cast a wider net
+// - different phrasings catch different papers
 async function generateSearchQueries(state: AgentState): Promise<Partial<AgentState>> {
   log.info({ topic: state.topic }, "Generating search queries");
 
@@ -118,6 +140,7 @@ async function generateSearchQueries(state: AgentState): Promise<Partial<AgentSt
     - Alternative terminology
     - Broader/narrower concepts`;
 
+    // race the LLM against a 15s timeout — query generation should be fast
     const response = await Promise.race([
       llm.invoke([
         new SystemMessage(systemPrompt),
@@ -130,7 +153,8 @@ async function generateSearchQueries(state: AgentState): Promise<Partial<AgentSt
 
     const content = typeof response.content === "string" ? response.content : JSON.stringify(response.content);
     
-    // Extract JSON array from response
+    // the LLM sometimes wraps the JSON in markdown code blocks or adds extra text,
+    // so we just grab the first JSON array we find
     const jsonMatch = content.match(/\[[\s\S]*?\]/);
     if (!jsonMatch) {
       log.warn("Failed to parse queries from LLM, using fallback");
@@ -148,7 +172,7 @@ async function generateSearchQueries(state: AgentState): Promise<Partial<AgentSt
     }
   } catch (error) {
     log.warn({ error: (error as Error).message }, "Query generation failed, using topic as query");
-    // Fallback: use topic and simple variations
+    // if the LLM fails, just use the topic + some simple variations
     return {
       searchQueries: [
         state.topic,
@@ -160,6 +184,9 @@ async function generateSearchQueries(state: AgentState): Promise<Partial<AgentSt
 }
 
 // ── Node: Search Papers (Parallel) ──────────────────────────
+
+// kicks off all searches at once — this is where the parallelism happens
+// each query gets its own API call, and we collect everything into one flat list
 async function searchPapersParallel(state: AgentState): Promise<Partial<AgentState>> {
   log.info({ queries: state.searchQueries }, "Searching papers in parallel");
 
@@ -192,6 +219,7 @@ async function searchPapersParallel(state: AgentState): Promise<Partial<AgentSta
     }
   });
 
+  // wait for all searches to finish, then flatten into one array
   const results = await Promise.all(searchPromises);
   const allPapers = results.flat();
 
@@ -200,17 +228,20 @@ async function searchPapersParallel(state: AgentState): Promise<Partial<AgentSta
 }
 
 // ── Node: Combine & Deduplicate ─────────────────────────────
+
+// merges all the search results, removes duplicates (by title),
+// and sorts by citation count — more citations = more impactful paper
 function combineResults(state: AgentState): Partial<AgentState> {
   log.info({ count: state.papers.length }, "Combining and deduplicating results");
 
   const seen = new Set<string>();
   const combined: Paper[] = [];
 
-  // Sort by citations descending
+  // sort by citations descending — most cited papers first
   const sorted = [...state.papers].sort((a, b) => b.citations - a.citations);
 
   for (const paper of sorted) {
-    // Deduplicate by title similarity
+    // deduplicate by title — different queries often return the same paper
     const normalizedTitle = paper.title.toLowerCase().trim();
     if (seen.has(normalizedTitle)) {
       continue;
@@ -219,12 +250,16 @@ function combineResults(state: AgentState): Partial<AgentState> {
     combined.push(paper);
   }
 
-  const result = combined.slice(0, MAX_RESULTS * 2); // Keep more for evaluation
+  // keep 2x maxResults so the LLM has more to evaluate
+  const result = combined.slice(0, MAX_RESULTS * 2);
   log.info({ deduplicatedCount: result.length }, "Results combined");
   return { combinedPapers: result };
 }
 
 // ── Node: Evaluate with LLM ────────────────────────────────
+
+// the final step — send all the deduplicated papers to the LLM
+// and ask it to evaluate and score them for relevance
 async function evaluatePapers(state: AgentState): Promise<Partial<AgentState>> {
   log.info({ count: state.combinedPapers.length }, "Evaluating papers with LLM");
 
@@ -251,7 +286,7 @@ async function evaluatePapers(state: AgentState): Promise<Partial<AgentState>> {
   } catch (error) {
     log.error({ error: (error as Error).message }, "LLM evaluation failed");
     
-    // Fallback to simpler model
+    // if the primary model fails, try the fallback
     try {
       const fallbackLlm = createLLM(FALLBACK_MODEL);
       const response = await fallbackLlm.invoke([
@@ -267,6 +302,9 @@ async function evaluatePapers(state: AgentState): Promise<Partial<AgentState>> {
 }
 
 // ── Build Graph ─────────────────────────────────────────────
+
+// wires up the state graph — this is the "flow" of the agent:
+// start -> generate queries -> search papers -> combine results -> evaluate -> end
 function buildAgentGraph() {
   const graph = new StateGraph(AgentStateAnnotation)
     .addNode("generateQueries", generateSearchQueries)
@@ -283,6 +321,8 @@ function buildAgentGraph() {
 }
 
 // ── Main Agent ──────────────────────────────────────────────
+
+// the public API — sets up initial state and runs the whole graph
 export async function runLangGraphAgent(
   topic: string,
   options: AgentOptions = {}
@@ -300,6 +340,7 @@ export async function runLangGraphAgent(
   const graph = buildAgentGraph();
 
   try {
+    // run the whole graph with a hard timeout
     const result = await Promise.race([
       graph.invoke({
         topic,

@@ -2,6 +2,10 @@ import { describe, it } from "node:test";
 import assert from "node:assert";
 import { searchPapersTool } from "../search-papers";
 
+// these are integration tests — they hit the real OpenAlex API
+// no mocking, which means they'll fail if OpenAlex is down or rate limits us
+// good enough for now but we should add mocks later
+
 describe("searchPapers", () => {
   it("returns papers for valid query", async () => {
     const result = await searchPapersTool.execute(
@@ -24,6 +28,7 @@ describe("searchPapers", () => {
     assert.strictEqual(result.success, true);
     assert.ok(result.papers.length > 0);
 
+    // make sure every paper has the basics — no broken data
     const paper = result.papers[0];
     assert.ok(paper.title);
     assert.ok(paper.year);

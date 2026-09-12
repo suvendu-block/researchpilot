@@ -1,6 +1,10 @@
 import { tool } from "ai";
 import { z } from "zod";
 
+// Vercel AI SDK tool definition for searching OpenAlex papers
+// this is designed to be used with generateText's tool-calling feature
+// (not currently wired up to either agent — it's ready for when we add tool-calling)
+
 export const searchPapersTool = tool({
   description:
     "Search for academic papers by topic. Returns paper titles, authors, abstracts, year, and citation count.",
@@ -10,7 +14,7 @@ export const searchPapersTool = tool({
       .number()
       .int()
       .min(1)
-      .max(50)
+      .max(50) // cap at 50 to avoid massive responses
       .default(10)
       .describe("Maximum number of papers to return"),
   }),
@@ -18,6 +22,7 @@ export const searchPapersTool = tool({
     const url = new URL("https://api.openalex.org/works");
     url.searchParams.set("search", query);
     url.searchParams.set("per_page", String(maxResults));
+    // only request the fields we need — saves bandwidth
     url.searchParams.set(
       "select",
       "id,title,authorships,publication_year,cited_by_count,doi,primary_location,abstract_inverted_index"
@@ -36,7 +41,8 @@ export const searchPapersTool = tool({
     const data = await res.json();
 
     const papers = (data.results ?? []).map((paper: any) => {
-      // Reconstruct abstract from inverted index
+      // OpenAlex returns abstracts as an inverted index — a map of word -> positions
+      // we need to reconstruct the actual text from it
       let abstract = "";
       if (paper.abstract_inverted_index) {
         const index = paper.abstract_inverted_index;
@@ -66,6 +72,7 @@ export const searchPapersTool = tool({
         abstract,
         year: paper.publication_year,
         citationCount: paper.cited_by_count,
+        // build a DOI link if available, otherwise just return the OpenAlex ID
         url: paper.doi
           ? `https://doi.org/${paper.doi}`
           : paper.id,

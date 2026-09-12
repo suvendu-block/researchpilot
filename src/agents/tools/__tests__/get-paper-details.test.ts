@@ -2,6 +2,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert";
 import { getPaperDetailsTool } from "../get-paper-details";
 
+// same deal as search-papers tests — these hit the live OpenAlex API
+
 describe("getPaperDetails", () => {
   it("returns papers for valid OpenAlex IDs", async () => {
     const result = await getPaperDetailsTool.execute(
@@ -36,6 +38,7 @@ describe("getPaperDetails", () => {
       ""
     );
 
+    // OpenAlex doesn't 404 on bad IDs — it just returns an empty result set
     assert.ok(result.success === true || result.success === false);
     assert.ok(result.papers.length <= 1);
   });
